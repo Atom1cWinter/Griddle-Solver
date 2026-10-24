@@ -76,7 +76,6 @@ def solve_chunk(args):
             if len(curr_word) >= 2: found_words.append({"word": curr_word, "coords": curr_coords})
         
         # --- STRICT VALIDATION BLOCK ---
-        # Catch edge-of-board words that passed the prefix check but aren't complete words
         for item in found_words:
             if item["word"] not in valid_words:
                 return
@@ -88,18 +87,26 @@ def solve_chunk(args):
         for item in found_words:
             word = item["word"]
             coords = item["coords"]
-            valid_coords.update(coords) # Track which tiles are actually used
+            valid_coords.update(coords)
             
-            word_score = sum(letter_values.get(char, 0) for char in word)
-            for mult in multipliers:
-                if (mult["row"], mult["col"]) in coords:
-                    word_score *= mult["value"]
-            total_score += word_score
+            word_score = 0
+            word_mult_factor = 1
+            
+            for i, (r, c) in enumerate(coords):
+                char_score = letter_values.get(word[i], 0)
+                for mult in multipliers:
+                    if mult["row"] == r and mult["col"] == c:
+                        if mult["type"] == 'L':
+                            char_score *= mult["value"]
+                        elif mult["type"] == 'W':
+                            word_mult_factor *= mult["value"]
+                word_score += char_score
+                
+            total_score += (word_score * word_mult_factor)
             
         # 4. Update Champion Board
         if total_score > best_score:
             best_score = total_score
-            # ONLY copy cells that are part of a valid scored word (removes stray single letters)
             best_board = [["" for _ in range(grid_size)] for _ in range(grid_size)]
             for r in range(grid_size):
                 for c in range(grid_size):
@@ -129,11 +136,9 @@ def solve_chunk(args):
             current_grid[row][col] = ""
             pool_counts[letter] += 1
 
-    # Validate the pre-seeded Cell 0 and Cell 1 before beginning the recursive dive
     if not is_valid_placement(0, 0, placing_blank=(opt0 == "")): return 0, None
     if not is_valid_placement(0, 1, placing_blank=(opt1 == "")): return 0, None
 
-    # Kick off from Cell 2 since 0 and 1 are handled by the multiprocessing chunker
     backtrack(2)
     return best_score, best_board
 
@@ -161,7 +166,6 @@ class GridWordSolver:
             with open(json_file, 'r') as f:
                 self.letter_values = json.load(f)
 
-        # --- NEW: Load persistent blacklist ---
         blacklist_file = "blacklist.json"
         if os.path.exists(blacklist_file):
             with open(blacklist_file, 'r') as f:
@@ -225,9 +229,17 @@ class GridWordSolver:
                     if not (0 <= row <= 3 and 0 <= col <= 3):
                         print("Coordinates must be between 1 and 4.")
                         continue
+                        
+                    m_type = input("Is this a Letter or Word multiplier? (L/W): ").strip().upper()
+                    if m_type not in ['L', 'W']:
+                        print("Please enter L or W.")
+                        continue
+                        
                     val = int(input("Enter multiplier value (e.g., 2, 3): "))
-                    self.multipliers.append({"row": row, "col": col, "value": val})
-                    print(f"-> Multiplier added at [Row {row+1}, Col {col+1}] with {val}x value.")
+                    self.multipliers.append({"row": row, "col": col, "value": val, "type": m_type})
+                    
+                    m_name = "Letter" if m_type == 'L' else "Word"
+                    print(f"-> {m_name} Multiplier added at [Row {row+1}, Col {col+1}] with {val}x value.")
                 except ValueError:
                     print("Invalid input. Please use integers.")
             else:
@@ -250,41 +262,44 @@ class GridWordSolver:
         from nltk.corpus import words
         master_word_list.update(w.upper() for w in words.words())
         
-        # 2. Load Words With Friends (ENABLE1)
-        enable_file = "enable1.txt"
-        if not os.path.exists(enable_file):
-            print("[INFO] Downloading Words With Friends (ENABLE1) dictionary...")
-            url = "https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt"
-            urllib.request.urlretrieve(url, enable_file)
-        with open(enable_file, 'r') as f:
-            for line in f:
-                master_word_list.add(line.strip().upper())
+        # 2. Batch Download & Load External Dictionaries
+        dict_sources = {
+            "enable1.txt": "https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt",
+            "sowpods.txt": "https://raw.githubusercontent.com/jesstess/Scrabble/master/scrabble/sowpods.txt",
+            "twl06.txt": "https://raw.githubusercontent.com/cviebrock/wordlists/master/TWL06.txt",
+            "ospd.txt": "https://raw.githubusercontent.com/dolph/dictionary/master/ospd.txt",
+            "dwyl_words.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
+            "letterpress.txt": "https://raw.githubusercontent.com/atebits/Words/master/Words/en.txt", 
+            "moby_words.txt": "https://raw.githubusercontent.com/words/moby/master/words.txt",
+            # Swapped broken crossword link for Google's scraped web corpus
+            "google_web_slang.txt": "https://raw.githubusercontent.com/first20hours/google-10000-english/master/20k.txt"
+        }
 
-        # 3. Load CSW / SOWPODS (International Scrabble)
-        csw_file = "sowpods.txt"
-        if not os.path.exists(csw_file):
-            print("[INFO] Downloading CSW/SOWPODS International dictionary...")
-            url = "https://raw.githubusercontent.com/jesstess/Scrabble/master/scrabble/sowpods.txt"
-            try:
-                urllib.request.urlretrieve(url, csw_file)
-            except Exception as e:
-                print(f"[WARNING] Failed to download SOWPODS: {e}")
+        print("\n[INFO] Synchronizing master dictionary databases...")
+        for filename, url in dict_sources.items():
+            if not os.path.exists(filename):
+                try:
+                    urllib.request.urlretrieve(url, filename)
+                except Exception as e:
+                    print(f"[WARNING] Failed to download {filename}: {e}")
+            
+            # If the file exists (either just downloaded or already there), read it
+            if os.path.exists(filename):
+                with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        master_word_list.add(line.strip().upper())
                 
-        if os.path.exists(csw_file):
-            with open(csw_file, 'r') as f:
-                for line in f:
-                    master_word_list.add(line.strip().upper())
-                
-        # 4. Load Scrabble 2-letter list
+        # 3. Load Scrabble 2-letter list
         scrabble_2 = {"AA","AB","AD","AE","AG","AH","AI","AL","AM","AN","AR","AS","AT","AW","AX","AY","BA","BE","BI","BO","BY","DA","DE","DO","ED","EF","EH","EL","EM","EN","ER","ES","ET","EX","FA","FE","GO","HA","HE","HI","HM","HO","ID","IF","IN","IS","IT","JO","KA","KI","LA","LI","LO","MA","ME","MI","MM","MO","MU","MY","NA","NE","NO","NU","OD","OE","OF","OH","OI","OM","ON","OP","OR","OS","OW","OX","OY","PA","PE","PI","PO","QI","RE","SH","SI","SO","TA","TE","TI","TO","UH","UM","UN","UP","US","UT","WE","WO","XI","XU","YA","YE","YO","ZA"}
         master_word_list.update(scrabble_2)
 
-        # 5. Load Custom Whitelist
+        # 4. Load Custom Whitelist
         if os.path.exists("whitelist.txt"):
-            with open("whitelist.txt", "r") as f:
+            with open("whitelist.txt", "r", encoding='utf-8', errors='ignore') as f:
                 for line in f:
                     master_word_list.add(line.strip().upper())
                     
+        # 5. Prune Invalid Words based on available letters and constraints
         pool_counts = Counter(self.letter_pool)
         
         for word in master_word_list:
@@ -304,7 +319,7 @@ class GridWordSolver:
             if can_build:
                 self.valid_words.add(word)
                 
-        print(f"\n-> Dictionary pruned: {len(self.valid_words)} combined valid words available.")
+        print(f"-> Dictionary pruned: {len(self.valid_words)} combined valid words available.")
 
     # ==========================================
     # 3. RECURSIVE MATRIX ENGINE (DFS) - LAUNCHER
@@ -324,7 +339,6 @@ class GridWordSolver:
         tasks = []
         pool_str = "".join(self.letter_pool)
         
-        # Build the exact branch permutations for the first two cells
         for opt0 in options:
             for opt1 in options:
                 temp_pool = Counter(self.letter_pool)
@@ -342,7 +356,6 @@ class GridWordSolver:
         total_chunks = len(tasks)
         print(f"[INFO] Search space partitioned into {total_chunks} parallel branches. Crushing data...")
 
-        # Create two empty lines in terminal to prepare for ANSI overwrite
         sys.stdout.write("\n\n")
         
         start_time = time.perf_counter()
@@ -352,7 +365,6 @@ class GridWordSolver:
             futures = [executor.submit(solve_chunk, task) for task in tasks]
             
             while completed_chunks < total_chunks:
-                # Wait 1.0 second at a time to update the UI cleanly
                 done, _ = concurrent.futures.wait(futures, timeout=1.0, return_when=concurrent.futures.FIRST_COMPLETED)
                 
                 for future in done:
@@ -364,8 +376,6 @@ class GridWordSolver:
                     futures.remove(future)
                 
                 elapsed = time.perf_counter() - start_time
-                
-                # \033[F moves cursor up to previous line, \033[K clears the line
                 sys.stdout.write(f"\033[F\033[F\r\033[KRuntime: {elapsed:.0f} seconds\n\r\033[K-> Progress: {completed_chunks} / {total_chunks} branches completed (Best Score so far: {self.best_score})\n")
                 sys.stdout.flush()
 
@@ -419,18 +429,26 @@ class GridWordSolver:
         for item in found_words:
             word = item["word"]
             coords = item["coords"]
-            base_score = sum(self.letter_values.get(char, 0) for char in word)
             
-            final_score = base_score
+            word_score = 0
+            word_mult_factor = 1
             multiplier_text = ""
-            for mult in self.multipliers:
-                if (mult["row"], mult["col"]) in coords:
-                    final_score *= mult["value"]
-                    multiplier_text += f" [x{mult['value']} Multiplier!]"
-                    
+            
+            for i, (r, c) in enumerate(coords):
+                char_score = self.letter_values.get(word[i], 0)
+                for mult in self.multipliers:
+                    if mult["row"] == r and mult["col"] == c:
+                        if mult["type"] == 'L':
+                            char_score *= mult["value"]
+                            multiplier_text += f" [x{mult['value']} Letter Mult!]"
+                        elif mult["type"] == 'W':
+                            word_mult_factor *= mult["value"]
+                            multiplier_text += f" [x{mult['value']} Word Mult!]"
+                word_score += char_score
+                
+            final_score = word_score * word_mult_factor
             print(f"- {word}: {final_score} pts {multiplier_text}")
             
-        # Calculate Unused Letters
         used_letters = []
         for r in range(self.grid_size):
             for c in range(self.grid_size):
@@ -473,10 +491,9 @@ class GridWordSolver:
             elif valid == 'N':
                 bad_words = input("Enter the rejected words, separated by commas: ").strip().upper()
                 for w in bad_words.split(','):
-                    if w.strip():  # Make sure it's not an empty string
+                    if w.strip():
                         self.blacklist.add(w.strip())
                 
-                # --- NEW: Save persistent blacklist ---
                 with open("blacklist.json", 'w') as f:
                     json.dump(list(self.blacklist), f, indent=4)
                     
